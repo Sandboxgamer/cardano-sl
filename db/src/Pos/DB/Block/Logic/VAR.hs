@@ -23,13 +23,13 @@ import           Control.Monad.Except (ExceptT (ExceptT),
                      MonadError (throwError), runExceptT, withExceptT)
 import qualified Data.List.NonEmpty as NE
 import           Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
-import           Formatting (build, sformat, shown, (%))
+import           Formatting (sformat, shown, stext, (%))
 
 import           Pos.Chain.Block (ApplyBlocksException (..), Block,
                      BlockHeader (..), Blund, HeaderHash,
                      RollbackException (..), Undo (..),
                      VerifyBlocksException (..), headerHash, headerHashG,
-                     mainHeaderSlot, prevBlockL)
+                     prevBlockL)
 import           Pos.Chain.Genesis as Genesis (Config (..), configEpochSlots)
 import           Pos.Chain.Txp (TxpConfiguration)
 import           Pos.Chain.Update (ConsensusEra (..), PollModifier,
@@ -49,6 +49,7 @@ import           Pos.DB.Block.Lrc (LrcModeFull, lrcSingleShot)
 import           Pos.DB.Block.Logic.SplitByEpoch (splitByEpoch)
 import           Pos.DB.Block.Slog.Logic (ShouldCallBListener (..),
                      mustDataBeKnown, slogVerifyBlocks)
+import           Pos.DB.Class (MonadDBRead)
 import           Pos.DB.Delegation (dlgVerifyBlocks)
 import qualified Pos.DB.GState.Common as GS (getTip, writeBatchGState)
 import           Pos.DB.Ssc (sscVerifyBlocks)
@@ -57,7 +58,7 @@ import           Pos.DB.Txp.Settings
 import           Pos.DB.Update (getAdoptedBV, getConsensusEra, usApplyBlocks, usVerifyBlocks)
 import           Pos.Util (neZipWith4, spanSafe, _neHead)
 import           Pos.Util.Util (HasLens (..))
-import           Pos.Util.Wlog (logDebug)
+import           Pos.Util.Wlog (HasLoggerName, CanLog, logDebug)
 
 -- -- CHECK: @verifyBlocksLogic
 -- -- #txVerifyBlocks
@@ -129,6 +130,20 @@ verifyBlocksPrefix genesisConfig currentSlot blocks = runExceptT $ do
 -- | Union of constraints required by block processing and LRC.
 type BlockLrcMode ctx m = (MonadBlockApply ctx m, LrcModeFull ctx m)
 
+timeAction :: (HasLoggerName m, CanLog m, MonadDBRead m, MonadIO m) => Text -> m b -> m b
+timeAction name action = do
+    before <- liftIO getCurrentTime
+    tip <- getTipHeader
+    ret <- action
+    after <- liftIO getCurrentTime
+    logDebug $
+        sformat ("TimeAction " % stext % ": epoch " % shown % ", " % shown % " microsecs")
+            name (getEpochIndex $ tip ^. epochIndexL) (diffTime after before)
+    pure ret
+  where
+    diffTime :: UTCTime -> UTCTime -> Int
+    diffTime a b = round (1000000 * diffUTCTime a b)
+
 -- | Applies a list of blocks (not necessarily from a single epoch) if they
 -- are valid. Takes one boolean flag @rollback@. On success, normalizes all
 -- mempools except the delegation one and returns the header hash of the last
@@ -151,36 +166,7 @@ verifyAndApplyBlocks
     -> Bool
     -> OldestFirst NE Block
     -> m (Either ApplyBlocksException (HeaderHash, NewestFirst [] Blund))
-verifyAndApplyBlocks genesisConfig txpConfig curSlot rollback blocks = do
-    before <- liftIO getCurrentTime
-    ret <- verifyAndApplyBlocks2 genesisConfig txpConfig curSlot rollback blocks
-    after <- liftIO getCurrentTime
-    logDebug $
-        sformat ("verifyAndApplyBlocksTime: epoch " % shown % ", " % shown % " microsecs for " % shown % " blocks")
-            (getEpoch blocks) (diffTime after before) (NE.length $ getOldestFirst blocks)
-    pure ret
-
-getEpoch :: OldestFirst NE Block -> Int
-getEpoch blks =
-    fromIntegral . getEpochIndex $ (NE.head $ getOldestFirst blks) ^. epochIndexL
-
-diffTime :: UTCTime -> UTCTime -> Int
-diffTime a b =
-    round (1000000 * diffUTCTime a b)
-
-verifyAndApplyBlocks2
-    :: forall ctx m.
-       ( BlockLrcMode ctx m
-       , MonadMempoolNormalization ctx m
-       , HasMisbehaviorMetrics ctx
-       )
-    => Genesis.Config
-    -> TxpConfiguration
-    -> Maybe SlotId
-    -> Bool
-    -> OldestFirst NE Block
-    -> m (Either ApplyBlocksException (HeaderHash, NewestFirst [] Blund))
-verifyAndApplyBlocks2 genesisConfig txpConfig curSlot rollback blocks = runExceptT $ do
+verifyAndApplyBlocks genesisConfig txpConfig curSlot rollback blocks = timeAction "verifyAndApplyBlocks" . runExceptT $ do
     tip <- lift getTipHeader
     let tipHash = headerHash tip
         assumedTip = blocks ^. _Wrapped . _neHead . prevBlockL
@@ -227,17 +213,13 @@ rollingVerifyAndApply genesisConfig curSlot rollback blunds (prefix : suffix) = 
             -- be slot 0 of the new epoch).
             tipHeader <- getTipHeader
             case tipHeader of
-                BlockHeaderGenesis _ -> pure ()
+                BlockHeaderGenesis _ -> pure () -- Should never happen in the OBFY era.
 
                 BlockHeaderMain mb ->
                     when (mb ^. epochIndexL == epochIndex - 1) $ do
+                        -- This should *only* happen at epoch boundaries of the OBFT era.
                         logDebug $ "Rolling: Calculating OBFT LRC if needed for epoch "
                                 <> pretty epochIndex
-
-                        logDebug $
-                            sformat ("Erik: slot " % build % ", current " % shown % ", other " % shown)
-                                (mb ^. mainHeaderSlot) (getEpochIndex $ mb ^. epochIndexL) (getEpochIndex $ epochIndex - 1)
-
                         lift $ lrcSingleShot genesisConfig epochIndex
 
                         -- Apply just the update payload of the first block of the next epoch.
@@ -246,7 +228,6 @@ rollingVerifyAndApply genesisConfig curSlot rollback blunds (prefix : suffix) = 
                         GS.writeBatchGState ops
 
     logDebug "Rolling: verifying"
-    logDebug $ sformat ("verifyBlocksPrefix: " % shown) (NE.length $ getOldestFirst prefix)
     lift (verifyBlocksPrefix genesisConfig curSlot prefix) >>= \case
         Left (ApplyBlocksVerifyFailure -> failure)
             | rollback  -> failWithRollback failure blunds

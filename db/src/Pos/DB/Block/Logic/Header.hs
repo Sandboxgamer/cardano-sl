@@ -119,9 +119,9 @@ classifyNewHeader genesisConfig (BlockHeaderMain header) = fmap (either identity
                     getEpochSlotLeaderScheduleObft genesisConfig
                                                    (siEpoch newHeaderSlot)
                 OBFT ObftLenient -> do
-                    lastBlkSlots <- GS.getLastSlots
                     let gStakeholders = Genesis.configGenesisWStakeholders genesisConfig
                         k = configBlkSecurityParam genesisConfig
+                    lastBlkSlots <- GS.getLastSlots k
                     pure $ ObftLenientLeaders (Set.fromList gStakeholders)
                                               k
                                               lastBlkSlots

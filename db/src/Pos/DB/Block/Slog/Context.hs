@@ -6,7 +6,7 @@ module Pos.DB.Block.Slog.Context
        ( mkSlogGState
        , mkSlogContext
        , cloneSlogGState
-       , slogGetLastSlots
+       , slogGetLastBlkSlots
        , slogPutLastSlots
        , slogRollbackLastSlots
        ) where
@@ -19,8 +19,8 @@ import qualified System.Metrics as Ekg
 import           Pos.Chain.Block (HasBlockConfiguration, HasSlogGState (..),
                      LastBlkSlots, SlogContext (..), SlogGState (..),
                      fixedTimeCQSec, sgsLastBlkSlots)
-import           Pos.Chain.Genesis as Genesis (Config (..))
-import           Pos.Core (BlockCount)
+import           Pos.Chain.Genesis as Genesis (Config (..), configBlkSecurityParam)
+import           Pos.Core (BlockCount (..))
 import           Pos.Core.Metrics.Constants (withCardanoNamespace)
 import           Pos.Core.Reporting (MetricMonitorState, mkMetricMonitorState)
 import           Pos.DB.Block.GState.BlockExtra (getLastSlots, putLastSlots,
@@ -31,10 +31,10 @@ import           Pos.Util.Wlog (CanLog)
 
 
 -- | Make new 'SlogGState' using data from DB.
-mkSlogGState :: (MonadIO m, MonadDBRead m) => m SlogGState
-mkSlogGState = do
-    _sgsLastBlkSlots <- getLastSlots >>= newIORef
-    return SlogGState {..}
+mkSlogGState :: (MonadIO m, MonadDBRead m) => BlockCount -> m SlogGState
+mkSlogGState (BlockCount k) = do
+    lbs <- getLastSlots $ fromIntegral k
+    SlogGState <$> newIORef lbs
 
 -- | Make new 'SlogContext' using data from DB.
 mkSlogContext
@@ -44,7 +44,7 @@ mkSlogContext
     -> Ekg.Store
     -> m SlogContext
 mkSlogContext k store = do
-    _scGState <- mkSlogGState
+    _scGState <- mkSlogGState k
 
     let mkMMonitorState :: Text -> m (MetricMonitorState a)
         mkMMonitorState = flip mkMetricMonitorState store
@@ -74,9 +74,9 @@ cloneSlogGState SlogGState {..} =
     SlogGState <$> (readIORef _sgsLastBlkSlots >>= newIORef)
 
 -- | Read 'LastBlkSlots' from in-memory state.
-slogGetLastSlots ::
+slogGetLastBlkSlots ::
        (MonadReader ctx m, HasSlogGState ctx, MonadIO m) => m LastBlkSlots
-slogGetLastSlots =
+slogGetLastBlkSlots =
     -- 'LastBlkSlots' is stored in two places, the DB and an 'IORef' so just
     -- grab the copy in the 'IORef'.
     readIORef =<< view (slogGState . sgsLastBlkSlots)
@@ -98,5 +98,5 @@ slogRollbackLastSlots
 slogRollbackLastSlots genesisConfig = do
     -- Roll back in the DB, then read the DB and set the 'IORef'.
     rollbackLastSlots genesisConfig
-    slots <- getLastSlots
+    slots <- getLastSlots (configBlkSecurityParam genesisConfig)
     view (slogGState . sgsLastBlkSlots) >>= flip writeIORef slots

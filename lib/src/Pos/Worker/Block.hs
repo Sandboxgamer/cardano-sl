@@ -52,7 +52,7 @@ import           Pos.DB (gsIsBootstrapEra)
 import           Pos.DB.Block (calcChainQualityFixedTime, calcChainQualityM,
                      calcOverallChainQuality, createGenesisBlockAndApply,
                      createMainBlockAndApply, getBlund, lrcSingleShot,
-                     normalizeMempool, rollbackBlocks, slogGetLastSlots)
+                     normalizeMempool, rollbackBlocks, slogGetLastBlkSlots)
 import qualified Pos.DB.BlockIndex as DB
 import           Pos.DB.Delegation (getDlgTransPsk, getPskByIssuer)
 import qualified Pos.DB.Lrc as LrcDB (getLeadersForEpoch)
@@ -419,7 +419,7 @@ metricWorker
     :: BlockWorkMode ctx m
     => BlockCount -> SlotId -> m ()
 metricWorker k curSlot = do
-    OldestFirst lastSlots <- slogGetLastSlots
+    OldestFirst lastSlots <- slogGetLastBlkSlots
     reportTotalBlocks
     reportSlottingData (kEpochSlots k) curSlot
     reportCrucialValues k
